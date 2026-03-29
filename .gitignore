@@ -4,3 +4,5 @@ __pycache__/
 .idea/
 .vscode/
 .env
+src/output_videos
+src/.DS_Store

@@ -1,8 +1,13 @@
 import os
-import subprocess
 import sys
+import subprocess
 
 import customtkinter as ctk
+import threading
+import yt_dlp
+import static_ffmpeg
+
+static_ffmpeg.add_paths()
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -47,6 +52,10 @@ class VideoCrawlerApp(ctk.CTk):
         self.setup_logs_tab()
         self.setup_settings_tab()
 
+        self.output_dir = "output_videos"
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+
     def setup_task_tab(self):
         tab = self.tabview.tab("Task Setup")
 
@@ -56,11 +65,6 @@ class VideoCrawlerApp(ctk.CTk):
         self.source_label.grid(row=0, column=0, padx=20, pady=(30, 10), sticky="w")
         self.source_optionmenu = ctk.CTkOptionMenu(tab, values=["YouTube", "TikTok", "Instagram"])
         self.source_optionmenu.grid(row=0, column=1, padx=20, pady=(30, 10), sticky="ew")
-
-        self.url_label = ctk.CTkLabel(tab, text="Starting URL:")
-        self.url_label.grid(row=1, column=0, padx=20, pady=10, sticky="w")
-        self.url_entry = ctk.CTkEntry(tab, placeholder_text="e.g., https://www.youtube.com/...")
-        self.url_entry.grid(row=1, column=1, padx=20, pady=10, sticky="ew")
 
         self.keyword_label = ctk.CTkLabel(tab, text="Target Objects/Actions:")
         self.keyword_label.grid(row=2, column=0, padx=20, pady=10, sticky="w")
@@ -108,34 +112,90 @@ class VideoCrawlerApp(ctk.CTk):
 
     def start_processing(self):
         source = self.source_optionmenu.get()
-        url = self.url_entry.get()
         keywords = self.keyword_entry.get()
 
-        if not url or not keywords:
+        if not keywords:
             self.tabview.set("Active Jobs & Logs")
-            self.log_message("[ERROR] Please provide both a URL and Search Criteria.")
+            self.log_message("[ERROR] Please provide Search Criteria.")
             return
 
         # Log the inputs
         self.tabview.set("Active Jobs & Logs")
         self.log_message(f"[INFO] Starting job...")
         self.log_message(f"Source: {source}")
-        self.log_message(f"URL: {url}")
         self.log_message(f"Keywords: {keywords}")
 
-        # TODO: yt-dlp integration
-        self.log_message("[INFO] Ready to begin downloading. (Waiting for Step 2...)")
-        self.log_message("-" * 40)
+        self.start_button.configure(state="disabled")
+
+        download_thread = threading.Thread(target=self.download_video, args=(keywords, ), daemon=True)
+        download_thread.start()
+
+    def download_video(self, keywords):
+        source = self.source_optionmenu.get()
+        self.after(0, self.log_message, f"[INFO] Initiating global crawler on: {source}")
+        self.after(0, self.log_message, f"[INFO] Searching for: '{keywords}'")
+        max_results = 3
+
+        if source == "YouTube":
+            search_query = f"ytsearch{max_results}:{keywords}"
+        elif source == "TikTok" or source == "Instagram":
+            self.after(0, self.log_message, f"[WARNING] {source} global search is limited for now.")
+            search_query = f"ytsearch{max_results}:{keywords}"
+        else:
+            self.after(0, self.log_message, f"[ERROR] {source} search not supported yet.")
+            return
+
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'match_filter': yt_dlp.utils.match_filter_func("duration < 300"),
+
+            'outtmpl': f'{self.output_dir}/%(title)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                self.after(0, self.log_message, f"[INFO] Traversing relevant links...")
+                info_dict = ydl.extract_info(search_query, download=True)
+
+                if 'entries' in info_dict:
+                    for entry in info_dict['entries']:
+                        if entry:
+                            self.after(0, self.log_message, f"[SUCCESS] Downloaded: {entry.get('title')}")
+                else:
+                    self.after(0, self.log_message, f"[SUCCESS] Downloaded: {info_dict.get('title')}")
+
+                self.after(0, self.log_message, "-" * 40)
+
+                if 'entries' in info_dict:
+                    for entry in info_dict['entries']:
+                        if entry:
+                            base_path = ydl.prepare_filename(entry)
+                            file_path = os.path.splitext(base_path)[0] + ".mp4"
+
+                            if os.path.exists(file_path):
+                                self.after(0, self.log_message, f"[INFO] Successfully Saved: {file_path}")
+                            else:
+                                self.after(0, self.log_message,
+                                           f"[WARNING] Skipped or failed to merge: {entry.get('title')}")
+                self.after(0, self.log_message, "-" * 40)
+
+                # TODO: Send this downloaded_file_path to Google Cloud Video Intelligence
+        except Exception as e:
+            self.after(0, self.log_message, f"[ERROR] Failed to download: {str(e)}")
+            self.after(0, self.log_message, "-" * 40)
+
+        finally:
+            self.after(0, lambda: self.start_button.configure(state="normal"))
 
     def open_output_folder(self):
-        path = os.getcwd()
-
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":  # macOS
-            subprocess.run(["open", path])
-        else:  # Linux and others
-            subprocess.run(["xdg-open", path])
+        if sys.platform.startswith("win"):
+            os.startfile(self.output_dir)
+        elif sys.platform == "darwin":
+            subprocess.call(["open", self.output_dir])
+        else:
+            subprocess.call(["xdg-open", self.output_dir])
 
 
 if __name__ == "__main__":
