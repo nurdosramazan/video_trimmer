@@ -1,17 +1,15 @@
 import os
 import sys
 import subprocess
+import threading
 
 import customtkinter as ctk
-import threading
-import yt_dlp
-import static_ffmpeg
-
-static_ffmpeg.add_paths()
+from llm_agent import LLMAgent
+from crawler import VideoDownloader
+from video_analyzer import VideoAnalyzer
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
-
 
 class VideoCrawlerApp(ctk.CTk):
     def __init__(self):
@@ -24,15 +22,15 @@ class VideoCrawlerApp(ctk.CTk):
         self.keyword_label = None
         self.keyword_entry = None
         self.start_button = None
-
         self.log_textbox = None
         self.log_btn_frame = None
         self.cancel_button = None
         self.open_folder_button = None
-
         self.api_label = None
         self.api_entry = None
         self.browse_api_btn = None
+        self.gemini_label = None
+        self.gemini_entry = None
 
         self.title("AI Video Crawler & Trimmer")
         self.geometry("700x550")
@@ -58,7 +56,6 @@ class VideoCrawlerApp(ctk.CTk):
 
     def setup_task_tab(self):
         tab = self.tabview.tab("Task Setup")
-
         tab.grid_columnconfigure(1, weight=1)
 
         self.source_label = ctk.CTkLabel(tab, text="Select Platform:")
@@ -77,7 +74,6 @@ class VideoCrawlerApp(ctk.CTk):
 
     def setup_logs_tab(self):
         tab = self.tabview.tab("Active Jobs & Logs")
-
         self.log_textbox = ctk.CTkTextbox(tab, state="disabled")
         self.log_textbox.pack(padx=20, pady=(20, 10), fill="both", expand=True)
 
@@ -97,97 +93,35 @@ class VideoCrawlerApp(ctk.CTk):
         tab.grid_columnconfigure(1, weight=1)
 
         self.api_label = ctk.CTkLabel(tab, text="Google Cloud JSON Path:")
-        self.api_label.grid(row=0, column=0, padx=20, pady=(30, 10), sticky="w")
-        self.api_entry = ctk.CTkEntry(tab, placeholder_text="Path to credentials.json (Future use)")
-        self.api_entry.grid(row=0, column=1, padx=20, pady=(30, 10), sticky="ew")
+        self.api_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        self.api_entry = ctk.CTkEntry(tab, placeholder_text="Path to credentials.json")
+        self.api_entry.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
 
-        self.browse_api_btn = ctk.CTkButton(tab, text="Browse", width=80)
-        self.browse_api_btn.grid(row=0, column=2, padx=(0, 20), pady=(30, 10))
+        self.browse_api_btn = ctk.CTkButton(tab, text="Browse", width=80, command=self.browse_api_key)
+        self.browse_api_btn.grid(row=0, column=2, padx=(0, 20), pady=(20, 10))
+
+        self.gemini_label = ctk.CTkLabel(tab, text="Gemini API Key:")
+        self.gemini_label.grid(row=1, column=0, padx=20, pady=(10, 10), sticky="w")
+        self.gemini_entry = ctk.CTkEntry(tab, placeholder_text="Paste your free Gemini API key here")
+        self.gemini_entry.grid(row=1, column=1, columnspan=2, padx=20, pady=(10, 10), sticky="ew")
+
+    def browse_api_key(self):
+        file_path = ctk.filedialog.askopenfilename(
+            title="Select Google Cloud JSON Key",
+            filetypes=[("JSON Files", "*.json")]
+        )
+        if file_path:
+            self.api_entry.delete(0, "end")
+            self.api_entry.insert(0, file_path)
 
     def log_message(self, message):
+        self.after(0, self._insert_log, message)
+
+    def _insert_log(self, message):
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert("end", message + "\n")
         self.log_textbox.configure(state="disabled")
         self.log_textbox.see("end")
-
-    def start_processing(self):
-        source = self.source_optionmenu.get()
-        keywords = self.keyword_entry.get()
-
-        if not keywords:
-            self.tabview.set("Active Jobs & Logs")
-            self.log_message("[ERROR] Please provide Search Criteria.")
-            return
-
-        # Log the inputs
-        self.tabview.set("Active Jobs & Logs")
-        self.log_message(f"[INFO] Starting job...")
-        self.log_message(f"Source: {source}")
-        self.log_message(f"Keywords: {keywords}")
-
-        self.start_button.configure(state="disabled")
-
-        download_thread = threading.Thread(target=self.download_video, args=(keywords, ), daemon=True)
-        download_thread.start()
-
-    def download_video(self, keywords):
-        source = self.source_optionmenu.get()
-        self.after(0, self.log_message, f"[INFO] Initiating global crawler on: {source}")
-        self.after(0, self.log_message, f"[INFO] Searching for: '{keywords}'")
-        max_results = 3
-
-        if source == "YouTube":
-            search_query = f"ytsearch{max_results}:{keywords}"
-        elif source == "TikTok" or source == "Instagram":
-            self.after(0, self.log_message, f"[WARNING] {source} global search is limited for now.")
-            search_query = f"ytsearch{max_results}:{keywords}"
-        else:
-            self.after(0, self.log_message, f"[ERROR] {source} search not supported yet.")
-            return
-
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'match_filter': yt_dlp.utils.match_filter_func("duration < 300"),
-
-            'outtmpl': f'{self.output_dir}/%(title)s.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.after(0, self.log_message, f"[INFO] Traversing relevant links...")
-                info_dict = ydl.extract_info(search_query, download=True)
-
-                if 'entries' in info_dict:
-                    for entry in info_dict['entries']:
-                        if entry:
-                            self.after(0, self.log_message, f"[SUCCESS] Downloaded: {entry.get('title')}")
-                else:
-                    self.after(0, self.log_message, f"[SUCCESS] Downloaded: {info_dict.get('title')}")
-
-                self.after(0, self.log_message, "-" * 40)
-
-                if 'entries' in info_dict:
-                    for entry in info_dict['entries']:
-                        if entry:
-                            base_path = ydl.prepare_filename(entry)
-                            file_path = os.path.splitext(base_path)[0] + ".mp4"
-
-                            if os.path.exists(file_path):
-                                self.after(0, self.log_message, f"[INFO] Successfully Saved: {file_path}")
-                            else:
-                                self.after(0, self.log_message,
-                                           f"[WARNING] Skipped or failed to merge: {entry.get('title')}")
-                self.after(0, self.log_message, "-" * 40)
-
-                # TODO: Send this downloaded_file_path to Google Cloud Video Intelligence
-        except Exception as e:
-            self.after(0, self.log_message, f"[ERROR] Failed to download: {str(e)}")
-            self.after(0, self.log_message, "-" * 40)
-
-        finally:
-            self.after(0, lambda: self.start_button.configure(state="normal"))
 
     def open_output_folder(self):
         if sys.platform.startswith("win"):
@@ -196,6 +130,64 @@ class VideoCrawlerApp(ctk.CTk):
             subprocess.call(["open", self.output_dir])
         else:
             subprocess.call(["xdg-open", self.output_dir])
+
+    def start_processing(self):
+        source = self.source_optionmenu.get()
+        raw_input = self.keyword_entry.get()
+
+        if not raw_input:
+            self.tabview.set("Active Jobs & Logs")
+            self.log_message("[ERROR] Please provide Search Criteria.")
+            return
+
+        self.tabview.set("Active Jobs & Logs")
+        self.log_message(f"[INFO] Starting job...")
+        self.log_message(f"Source: {source}")
+        self.log_message(f"Keywords: {raw_input}")
+
+        self.start_button.configure(state="disabled")
+
+        agent_thread = threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source), daemon=True)
+        agent_thread.start()
+
+    def run_agent_pipeline(self, raw_input, source):
+        try:
+            gemini_key = self.gemini_entry.get()
+            google_json = self.api_entry.get()
+
+            agent = LLMAgent(api_key=gemini_key, logger_callback=self.log_message)
+            crawler = VideoDownloader(output_dir=self.output_dir, logger_callback=self.log_message)
+            vision_ai = VideoAnalyzer(json_key_path=google_json, logger_callback=self.log_message)
+
+            optimized_data = agent.translate_intent(raw_input)
+            if not optimized_data:
+                return
+
+            search_query = optimized_data["platform_search_query"]
+            vision_objects = optimized_data["vision_target_objects"]
+
+            self.log_message(f"[INFO] Searching for: '{vision_objects}'")
+
+            downloaded_files = crawler.download(search_query, source)
+
+            for title, file_path in downloaded_files:
+                self.log_message(f"[INFO] Successfully Saved: {file_path}")
+
+                timestamps = vision_ai.analyze(file_path, vision_objects)
+
+                if timestamps:
+                    self.log_message("-" * 40)
+                    self.log_message("[INFO] Ready for Step 4 (Trimming).")
+                    # TODO: Step 4 - Send timestamps to FFmpeg to cut the video
+                else:
+                    self.log_message(f"[WARNING] No visual matches found, skipping trim for: {title}")
+
+                self.log_message("-" * 40)
+
+        except Exception as e:
+            self.log_message(f"[PIPELINE ERROR] {str(e)}")
+        finally:
+            self.after(0, lambda: self.start_button.configure(state="normal"))
 
 
 if __name__ == "__main__":
