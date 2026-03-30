@@ -1,13 +1,18 @@
 import os
 import io
+import math
 from google.cloud import videointelligence
+from difflib import SequenceMatcher
 
 class VideoAnalyzer:
     def __init__(self, json_key_path, logger_callback):
         self.json_key_path = json_key_path
         self.log = logger_callback
 
-    def analyze(self, video_path, target_objects_list):
+    def is_similar(self, a, b):
+        return SequenceMatcher(None, a, b).ratio() > 0.7
+
+    def analyze(self, video_path, intent_data):
         if not os.path.exists(self.json_key_path):
             self.log("[ERROR] Google Cloud JSON key not found! Please set it in the Settings tab.")
             return None
@@ -15,7 +20,11 @@ class VideoAnalyzer:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.json_key_path
 
         self.log(f"[AI] Analyzing video: {os.path.basename(video_path)}...")
-        self.log(f"[AI] Targets we are hunting for: {target_objects_list}")
+        positive_targets = [t.lower() for t in intent_data["vision_target_objects"] + intent_data["broad_synonyms"]]
+        negative_targets = [t.lower() for t in intent_data["negative_concepts"]]
+
+        self.log(f"[AI] Targets we are hunting for: {intent_data}")
+        self.log(f"[AI] Negatives we penalize: {negative_targets}")
         self.log(f"[AI] This may take a minute or two depending on video length.")
 
         try:
@@ -24,7 +33,10 @@ class VideoAnalyzer:
             with io.open(video_path, "rb") as movie:
                 input_content = movie.read()
 
-            features = [videointelligence.Feature.OBJECT_TRACKING]
+            features = [
+                videointelligence.Feature.OBJECT_TRACKING,
+                videointelligence.Feature.LABEL_DETECTION
+            ]
             request = videointelligence.AnnotateVideoRequest(
                 input_content=input_content,
                 features=features,
@@ -36,65 +48,93 @@ class VideoAnalyzer:
 
             self.log("[AI] Analysis complete! Scanning for matches...")
 
-            annotations = result.annotation_results[0].object_annotations
+            max_time = 0.0
 
-            if not annotations:
-                self.log("[AI] Google Cloud returned ZERO objects for this video.")
+            def get_end_time(segment):
+                return segment.end_time_offset.total_seconds()
+
+            raw_positives = []
+            raw_negatives = []
+            detected_vocab = set()
+
+            for obj in result.annotation_results[0].object_annotations:
+                label = obj.entity.description.lower()
+                detected_vocab.add(label)
+                start = obj.segment.start_time_offset.total_seconds()
+                end = get_end_time(obj.segment)
+                if end > max_time: max_time = end
+
+                if any(self.is_similar(term, label) or term in label for term in positive_targets):
+                    raw_positives.append((label, start, end))
+                elif any(self.is_similar(term, label) or term in label for term in negative_targets):
+                    raw_negatives.append((label, start, end))
+
+            for label_annotation in result.annotation_results[0].segment_label_annotations:
+                label = label_annotation.entity.description.lower()
+                detected_vocab.add(label)
+                for segment in label_annotation.segments:
+                    start = segment.segment.start_time_offset.total_seconds()
+                    end = get_end_time(segment.segment)
+                    if end > max_time: max_time = end
+
+                    if any(self.is_similar(term, label) or term in label for term in positive_targets):
+                        raw_positives.append((label, start, end))
+                    elif any(self.is_similar(term, label) or term in label for term in negative_targets):
+                        raw_negatives.append((label, start, end))
+
+            self.log(f"[RAW DATA] Google's vocabulary for this video included: {list(detected_vocab)[:15]}...")
+            if not raw_positives:
+                self.log("[WARNING] No target objects or synonyms were found in this video.")
                 return None
 
-            self.log("[RAW DATA] Gathering all unique physical objects detected in the video...")
-            detected_entities = set()
+            num_buckets = math.ceil(max_time) + 1
+            time_buckets = [{"pos": set(), "neg": set()} for _ in range(num_buckets)]
 
-            for obj in annotations:
-                name = obj.entity.description.lower()
-                detected_entities.add(name)
+            for label, start, end in raw_positives:
+                for sec in range(math.floor(start), math.ceil(end)):
+                    if sec < num_buckets: time_buckets[sec]["pos"].add(label)
 
-            self.log(f"[RAW DATA] Google's vocabulary for this video: {list(detected_entities)}")
-            self.log(f"[AI] --------------------------------------------------")
+            for label, start, end in raw_negatives:
+                for sec in range(math.floor(start), math.ceil(end)):
+                    if sec < num_buckets: time_buckets[sec]["neg"].add(label)
 
-            valid_timestamps = []
-            search_terms = [term.lower() for term in target_objects_list]
+            action_seconds = []
+            for sec, bucket in enumerate(time_buckets):
+                score = len(bucket["pos"]) - (len(bucket["neg"]) * 3)  # Negatives carry a heavy penalty
 
-            for obj in annotations:
-                found_label = obj.entity.description.lower()
-                if any(term in found_label for term in search_terms):
-                    start = obj.segment.start_time_offset.total_seconds()
-                    end = obj.segment.end_time_offset.total_seconds()
-                    conf = obj.confidence
+                if score >= 2:
+                    action_seconds.append(sec)
 
-                    self.log(f"[AI] Hit: '{found_label}' (Conf: {conf:.2f}) | {start}s to {end}s")
-                    valid_timestamps.append((start, end))
-
-            if not valid_timestamps:
-                self.log("[AI] No target objects were physically tracked in this video.")
+            if not action_seconds:
+                self.log(
+                    "[WARNING] Objects were found, but were heavily filtered by negative 'Talking Head' constraints.")
                 return None
 
-            merged_timestamps = self._merge_intervals(valid_timestamps)
+            intervals = []
+            current_start = action_seconds[0]
+            current_end = action_seconds[0]
 
-            self.log(f"[AI] --------------------------------------------------")
-            self.log(
-                f"[AI] Merged {len(valid_timestamps)} raw tracking blips into {len(merged_timestamps)} solid clips.")
+            for sec in action_seconds[1:]:
+                if sec <= current_end + 3:
+                    current_end = sec
+                else:
+                    intervals.append((current_start, current_end))
+                    current_start = sec
+                    current_end = sec
+            intervals.append((current_start, current_end))
 
-            for i, (start, end) in enumerate(merged_timestamps):
-                self.log(f"      -> Final Trim Clip {i + 1}: {start}s to {end}s")
+            final_clips = []
+            for start, end in intervals:
+                if (end - start) >= 2:
+                    pad_start = max(0.0, float(start) - 2.0)
+                    pad_end = float(end) + 2.0
+                    final_clips.append((pad_start, pad_end))
 
-            return merged_timestamps
+            self.log(f"[AI SUCCESS] Extracted {len(final_clips)} action-dense clips!")
+            for i, (s, e) in enumerate(final_clips):
+                self.log(f"      -> Final Trim Clip {i + 1}: {s}s to {e}s")
+
+            return final_clips
         except Exception as e:
             self.log(f"[AI ERROR] {str(e)}")
             return None
-
-    def _merge_intervals(self, intervals):
-        if not intervals:
-            return []
-
-        intervals.sort(key=lambda x: x[0])
-        merged = [intervals[0]]
-
-        for current in intervals[1:]:
-            previous = merged[-1]
-            if current[0] <= previous[1] + 1.5:
-                merged[-1] = (previous[0], max(previous[1], current[1]))
-            else:
-                merged.append(current)
-
-        return merged

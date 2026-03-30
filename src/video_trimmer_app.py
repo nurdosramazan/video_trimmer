@@ -173,7 +173,7 @@ class VideoCrawlerApp(ctk.CTk):
             for title, file_path in downloaded_files:
                 self.log_message(f"[INFO] Successfully Saved: {file_path}")
 
-                timestamps = vision_ai.analyze(file_path, vision_objects)
+                timestamps = vision_ai.analyze(file_path, optimized_data)
 
                 if timestamps:
                     self.log_message("-" * 40)
@@ -188,6 +188,8 @@ class VideoCrawlerApp(ctk.CTk):
             self.log_message(f"[PIPELINE ERROR] {str(e)}")
         finally:
             self.after(0, lambda: self.start_button.configure(state="normal"))
+
+        self.log_message("[INFO] End of the session.")
 
 
 if __name__ == "__main__":

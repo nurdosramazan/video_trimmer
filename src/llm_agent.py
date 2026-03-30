@@ -16,13 +16,17 @@ class LLMAgent:
             prompt = f"""
             A user wants to find video clips of the following action/concept: "{raw_input}"
     
-            Task 1: Create a highly optimized, broad search query to type into YouTube to find videos likely to contain this action.
-            Task 2: Break this action down into a list of 2 to 5 specific, physical visual nouns (objects) that must appear in the camera frame for this action to be happening.
-    
-            Return ONLY valid JSON in this exact format:
+            Task 1: Create a highly optimized, broad search query for YouTube to find this action.
+            Task 2: List 2 to 4 specific, physical objects that MUST appear on screen for this action to occur.
+            Task 3: List 3 to 5 broad category synonyms for those objects (e.g., if object is 'onion', synonym is 'vegetable' or 'food'). Google Cloud Vision uses broad labels, so these are crucial.
+            Task 4: List 2 to 4 negative visual concepts that indicate the person is just talking to the camera instead of doing the action (e.g., 'face', 'portrait', 'conversation', 'speaking').
+
+            Return ONLY valid JSON:
             {{
                 "platform_search_query": "string",
-                "vision_target_objects": ["noun1", "noun2", "noun3"]
+                "vision_target_objects": ["obj1", "obj2"],
+                "broad_synonyms": ["synonym1", "synonym2"],
+                "negative_concepts": ["neg1", "neg2"]
             }}
             """
 
