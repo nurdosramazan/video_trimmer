@@ -17,13 +17,13 @@ class VideoCrawlerApp(ctk.CTk):
         super().__init__()
 
         self.title("AI Video Crawler & Trimmer")
-        self.geometry("700x600")
+        self.geometry("700x650")
         self.resizable(False, False)
 
         self.title_label = ctk.CTkLabel(self, text="Targeted Video Crawler", font=ctk.CTkFont(size=24, weight="bold"))
         self.title_label.pack(pady=(20, 10))
 
-        self.tabview = ctk.CTkTabview(self, width=650, height=400)
+        self.tabview = ctk.CTkTabview(self, width=650, height=450)
         self.tabview.pack(padx=20, pady=10, fill="both", expand=True)
 
         self.tabview.add("Task Setup")
@@ -42,9 +42,9 @@ class VideoCrawlerApp(ctk.CTk):
         tab = self.tabview.tab("Task Setup")
         tab.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(tab, text="Select Platform:").grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        ctk.CTkLabel(tab, text="Select Platform:").grid(row=0, column=0, padx=20, pady=(15, 10), sticky="w")
         self.source_optionmenu = ctk.CTkOptionMenu(tab, values=["YouTube", "TikTok", "Instagram"])
-        self.source_optionmenu.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
+        self.source_optionmenu.grid(row=0, column=1, padx=20, pady=(15, 10), sticky="ew")
 
         ctk.CTkLabel(tab, text="Search Criteria:").grid(row=1, column=0, padx=20, pady=10, sticky="w")
         self.keyword_entry = ctk.CTkEntry(tab, placeholder_text="e.g., bench press, cutting onion")
@@ -52,12 +52,17 @@ class VideoCrawlerApp(ctk.CTk):
 
         ctk.CTkLabel(tab, text="Target Clip Count:").grid(row=2, column=0, padx=20, pady=10, sticky="w")
         self.count_entry = ctk.CTkEntry(tab, placeholder_text="How many videos do you want?")
-        self.count_entry.insert(0, "3")  # Default to 3
+        self.count_entry.insert(0, "3")
         self.count_entry.grid(row=2, column=1, padx=20, pady=10, sticky="ew")
+
+        ctk.CTkLabel(tab, text="Max Seconds Per Video:").grid(row=3, column=0, padx=20, pady=10, sticky="w")
+        self.length_entry = ctk.CTkEntry(tab, placeholder_text="e.g. 10")
+        self.length_entry.insert(0, "15")
+        self.length_entry.grid(row=3, column=1, padx=20, pady=10, sticky="ew")
 
         self.start_button = ctk.CTkButton(tab, text="Start Crawling & Trimming", command=self.start_processing,
                                           height=40)
-        self.start_button.grid(row=3, column=0, columnspan=2, padx=20, pady=(40, 10))
+        self.start_button.grid(row=4, column=0, columnspan=2, padx=20, pady=(30, 10))
 
     def setup_logs_tab(self):
         tab = self.tabview.tab("Active Jobs & Logs")
@@ -66,10 +71,6 @@ class VideoCrawlerApp(ctk.CTk):
 
         self.log_btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
         self.log_btn_frame.pack(fill="x", padx=20, pady=(0, 20))
-
-        self.cancel_button = ctk.CTkButton(self.log_btn_frame, text="Cancel Job", fg_color="#b23b3b",
-                                           hover_color="#8f2f2f")
-        self.cancel_button.pack(side="left", padx=(0, 10))
 
         self.open_folder_button = ctk.CTkButton(self.log_btn_frame, text="Open Output Folder",
                                                 command=self.open_output_folder)
@@ -112,8 +113,9 @@ class VideoCrawlerApp(ctk.CTk):
 
         try:
             target_count = int(self.count_entry.get())
+            max_len = float(self.length_entry.get())
         except ValueError:
-            self.log_message("[ERROR] Please enter a valid number for Target Count.")
+            self.log_message("[ERROR] Please enter valid numbers for Count and Length.")
             return
 
         if not raw_input:
@@ -122,15 +124,15 @@ class VideoCrawlerApp(ctk.CTk):
             return
 
         self.tabview.set("Active Jobs & Logs")
+        self.log_message("-" * 40)
         self.log_message(f"[INFO] Starting job...")
-        self.log_message(f"Source: {source}")
-        self.log_message(f"Keywords: {raw_input}")
+        self.log_message(f"STARTING NEW JOB: {raw_input} ({source})")
 
         self.start_button.configure(state="disabled")
 
-        threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source, target_count), daemon=True).start()
+        threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source, target_count, max_len), daemon=True).start()
 
-    def run_agent_pipeline(self, raw_input, source, target_count):
+    def run_agent_pipeline(self, raw_input, source, target_count, max_len):
         try:
             gemini_key_intent = self.gemini_intent_entry.get()
             gemini_key_video = self.gemini_video_entry.get()
@@ -148,27 +150,24 @@ class VideoCrawlerApp(ctk.CTk):
             url_pool = crawler.search_urls(optimized_data["platform_search_query"], source, limit=20)
             successful_clips = 0
             while successful_clips < target_count and url_pool:
-                current_url = url_pool.pop(0)  # Get the next URL in line
+                current_url = url_pool.pop(0)
                 self.log_message(f"\n[PIPELINE] Processing next candidate ({successful_clips}/{target_count} done)")
 
-                # Download
                 video_file = crawler.download_single(current_url)
                 if not video_file:
-                    continue  # Skip to next URL if download fails
+                    continue
 
-                # Analyze
-                self.log_message(f"[PIPELINE] Analyzing {os.path.basename(video_file)}...")
                 timestamps = analyzer.analyze_with_gemini(video_file, raw_input)
 
                 if timestamps:
-                    self.log_message(f"[SUCCESS] Found {len(timestamps)} matches. Trimming now...")
-                    final_video = editor.trim_and_merge(video_file, timestamps)
+                    final_video = editor.trim_and_merge(video_file, timestamps, max_length=max_len)
                     if final_video:
                         successful_clips += 1
-                        if os.path.exists(video_file):
-                            os.remove(video_file)
                 else:
                     self.log_message(f"[SKIP] No action matches found in this video.")
+
+                if os.path.exists(video_file):
+                    os.remove(video_file)
 
             if successful_clips < target_count:
                 self.log_message(f"[INFO] Finished. Found {successful_clips} clips (ran out of search results).")
