@@ -7,6 +7,7 @@ import customtkinter as ctk
 from llm_agent import LLMAgent
 from crawler import VideoDownloader
 from video_analyzer import VideoAnalyzer
+from video_editor import VideoEditor
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -137,6 +138,7 @@ class VideoCrawlerApp(ctk.CTk):
             agent = LLMAgent(api_key=gemini_key_intent, logger_callback=self.log_message)
             crawler = VideoDownloader(output_dir=self.output_dir, logger_callback=self.log_message)
             analyzer = VideoAnalyzer(api_key=gemini_key_video, logger_callback=self.log_message)
+            editor = VideoEditor(output_dir=self.output_dir, logger_callback=self.log_message)
 
             optimized_data = agent.translate_intent(raw_input)
             if not optimized_data:
@@ -159,9 +161,12 @@ class VideoCrawlerApp(ctk.CTk):
                 timestamps = analyzer.analyze_with_gemini(video_file, raw_input)
 
                 if timestamps:
-                    # TODO: Step 4 - Trigger Trimming with FFmpeg
                     self.log_message(f"[SUCCESS] Found {len(timestamps)} matches. Trimming now...")
-                    successful_clips += 1
+                    final_video = editor.trim_and_merge(video_file, timestamps)
+                    if final_video:
+                        successful_clips += 1
+                        if os.path.exists(video_file):
+                            os.remove(video_file)
                 else:
                     self.log_message(f"[SKIP] No action matches found in this video.")
 

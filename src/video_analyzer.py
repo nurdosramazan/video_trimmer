@@ -34,8 +34,6 @@ class VideoAnalyzer:
                 self.log("[AI ERROR] Gemini failed to process this video.")
                 return None
 
-            self.log("[AI] Processing complete. Scanning for action timestamps...")
-
             # 3. Prompt Gemini to find the exact action
             prompt = f"""
                     Watch this video carefully. The user is looking for clips showing exactly this action/concept: "{action_description}"
