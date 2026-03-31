@@ -1,5 +1,6 @@
 
-customtkinter
 yt-dlp
 static-ffmpeg
+duckduckgo-search
 protobuf
+customtkinter

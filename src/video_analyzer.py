@@ -1,140 +1,89 @@
 import os
-import io
-import math
-from google.cloud import videointelligence
-from difflib import SequenceMatcher
+import time
+import json
+from google import genai
 
 class VideoAnalyzer:
-    def __init__(self, json_key_path, logger_callback):
-        self.json_key_path = json_key_path
+    def __init__(self, api_key, logger_callback):
+        self.api_key = api_key
         self.log = logger_callback
 
-    def is_similar(self, a, b):
-        return SequenceMatcher(None, a, b).ratio() > 0.7
+        if self.api_key:
+            self.client = genai.Client(api_key=self.api_key)
+        else:
+            self.client = None
 
-    def analyze(self, video_path, intent_data):
-        if not os.path.exists(self.json_key_path):
-            self.log("[ERROR] Google Cloud JSON key not found! Please set it in the Settings tab.")
+    def analyze_with_gemini(self, video_path, action_description):
+        if not self.client:
+            self.log("[AI ERROR] Gemini API Key is missing! Set it in Settings.")
             return None
 
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.json_key_path
-
-        self.log(f"[AI] Analyzing video: {os.path.basename(video_path)}...")
-        positive_targets = [t.lower() for t in intent_data["vision_target_objects"] + intent_data["broad_synonyms"]]
-        negative_targets = [t.lower() for t in intent_data["negative_concepts"]]
-
-        self.log(f"[AI] Targets we are hunting for: {intent_data}")
-        self.log(f"[AI] Negatives we penalize: {negative_targets}")
-        self.log(f"[AI] This may take a minute or two depending on video length.")
-
+        self.log(f"[AI] Uploading {os.path.basename(video_path)} to Gemini for analysis...")
         try:
-            client = videointelligence.VideoIntelligenceServiceClient()
+            # 1. Upload the video file to Gemini
+            video_file = self.client.files.upload(file=video_path)
 
-            with io.open(video_path, "rb") as movie:
-                input_content = movie.read()
+            # 2. Wait for Gemini to finish processing the video
+            self.log("[AI] Video uploaded. Waiting for Gemini to process the file...")
+            while video_file.state.name == "PROCESSING":
+                time.sleep(3)  # Check every 3 seconds
+                # Refresh the file status
+                video_file = self.client.files.get(name=video_file.name)
 
-            features = [
-                videointelligence.Feature.OBJECT_TRACKING,
-                videointelligence.Feature.LABEL_DETECTION
-            ]
-            request = videointelligence.AnnotateVideoRequest(
-                input_content=input_content,
-                features=features,
+            if video_file.state.name == "FAILED":
+                self.log("[AI ERROR] Gemini failed to process this video.")
+                return None
+
+            self.log("[AI] Processing complete. Scanning for action timestamps...")
+
+            # 3. Prompt Gemini to find the exact action
+            prompt = f"""
+                    Watch this video carefully. The user is looking for clips showing exactly this action/concept: "{action_description}"
+
+                    Find the exact start and end timestamps (in seconds) where this action is actively happening on screen.
+                    Ignore any parts where a person is just talking to the camera about the action.
+
+                    Return ONLY a valid JSON list of dictionaries containing 'start' and 'end' float values. 
+                    Example format:
+                    [
+                        {{"start": 12.5, "end": 18.0}},
+                        {{"start": 45.0, "end": 52.5}}
+                    ]
+                    If the action does not occur in the video, return an empty list: []
+                    """
+
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[video_file, prompt],
+                config={"response_mime_type": "application/json"}
             )
-            self.log("[AI] Request sent to Google Cloud. Waiting for processing...")
 
-            operation = client.annotate_video(request=request)
-            result = operation.result(timeout=600)
+            # 4. Clean up: Delete the file from Gemini's servers to save your quota
+            self.client.files.delete(name=video_file.name)
 
-            self.log("[AI] Analysis complete! Scanning for matches...")
-
-            max_time = 0.0
-
-            def get_end_time(segment):
-                return segment.end_time_offset.total_seconds()
-
-            raw_positives = []
-            raw_negatives = []
-            detected_vocab = set()
-
-            for obj in result.annotation_results[0].object_annotations:
-                label = obj.entity.description.lower()
-                detected_vocab.add(label)
-                start = obj.segment.start_time_offset.total_seconds()
-                end = get_end_time(obj.segment)
-                if end > max_time: max_time = end
-
-                if any(self.is_similar(term, label) or term in label for term in positive_targets):
-                    raw_positives.append((label, start, end))
-                elif any(self.is_similar(term, label) or term in label for term in negative_targets):
-                    raw_negatives.append((label, start, end))
-
-            for label_annotation in result.annotation_results[0].segment_label_annotations:
-                label = label_annotation.entity.description.lower()
-                detected_vocab.add(label)
-                for segment in label_annotation.segments:
-                    start = segment.segment.start_time_offset.total_seconds()
-                    end = get_end_time(segment.segment)
-                    if end > max_time: max_time = end
-
-                    if any(self.is_similar(term, label) or term in label for term in positive_targets):
-                        raw_positives.append((label, start, end))
-                    elif any(self.is_similar(term, label) or term in label for term in negative_targets):
-                        raw_negatives.append((label, start, end))
-
-            self.log(f"[RAW DATA] Google's vocabulary for this video included: {list(detected_vocab)[:15]}...")
-            if not raw_positives:
-                self.log("[WARNING] No target objects or synonyms were found in this video.")
+            # 5. Parse the JSON response
+            try:
+                clips = json.loads(response.text)
+            except json.JSONDecodeError:
+                self.log("[AI ERROR] Gemini returned invalid JSON format.")
+                self.log(response.text)
                 return None
 
-            num_buckets = math.ceil(max_time) + 1
-            time_buckets = [{"pos": set(), "neg": set()} for _ in range(num_buckets)]
-
-            for label, start, end in raw_positives:
-                for sec in range(math.floor(start), math.ceil(end)):
-                    if sec < num_buckets: time_buckets[sec]["pos"].add(label)
-
-            for label, start, end in raw_negatives:
-                for sec in range(math.floor(start), math.ceil(end)):
-                    if sec < num_buckets: time_buckets[sec]["neg"].add(label)
-
-            action_seconds = []
-            for sec, bucket in enumerate(time_buckets):
-                score = len(bucket["pos"]) - (len(bucket["neg"]) * 3)  # Negatives carry a heavy penalty
-
-                if score >= 2:
-                    action_seconds.append(sec)
-
-            if not action_seconds:
-                self.log(
-                    "[WARNING] Objects were found, but were heavily filtered by negative 'Talking Head' constraints.")
+            if not clips:
                 return None
 
-            intervals = []
-            current_start = action_seconds[0]
-            current_end = action_seconds[0]
-
-            for sec in action_seconds[1:]:
-                if sec <= current_end + 3:
-                    current_end = sec
-                else:
-                    intervals.append((current_start, current_end))
-                    current_start = sec
-                    current_end = sec
-            intervals.append((current_start, current_end))
-
+            # Convert JSON dicts into a list of tuples: [(start, end), (start, end)]
             final_clips = []
-            for start, end in intervals:
-                if (end - start) >= 2:
-                    pad_start = max(0.0, float(start) - 2.0)
-                    pad_end = float(end) + 2.0
-                    final_clips.append((pad_start, pad_end))
+            for i, clip in enumerate(clips):
+                start = float(clip.get("start", 0.0))
+                end = float(clip.get("end", 0.0))
 
-            self.log(f"[AI SUCCESS] Extracted {len(final_clips)} action-dense clips!")
-            for i, (s, e) in enumerate(final_clips):
-                self.log(f"      -> Final Trim Clip {i + 1}: {s}s to {e}s")
+                # Only keep clips that are at least 1 second long
+                if end - start >= 1.0:
+                    final_clips.append((start, end))
+                    self.log(f"      -> AI Found Action: {start}s to {end}s")
 
-            return final_clips
+            return final_clips if final_clips else None
         except Exception as e:
             self.log(f"[AI ERROR] {str(e)}")
             return None

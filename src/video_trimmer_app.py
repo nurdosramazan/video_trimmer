@@ -2,8 +2,8 @@ import os
 import sys
 import subprocess
 import threading
-
 import customtkinter as ctk
+
 from llm_agent import LLMAgent
 from crawler import VideoDownloader
 from video_analyzer import VideoAnalyzer
@@ -15,25 +15,8 @@ class VideoCrawlerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.source_label = None
-        self.source_optionmenu = None
-        self.url_label = None
-        self.url_entry = None
-        self.keyword_label = None
-        self.keyword_entry = None
-        self.start_button = None
-        self.log_textbox = None
-        self.log_btn_frame = None
-        self.cancel_button = None
-        self.open_folder_button = None
-        self.api_label = None
-        self.api_entry = None
-        self.browse_api_btn = None
-        self.gemini_label = None
-        self.gemini_entry = None
-
         self.title("AI Video Crawler & Trimmer")
-        self.geometry("700x550")
+        self.geometry("700x600")
         self.resizable(False, False)
 
         self.title_label = ctk.CTkLabel(self, text="Targeted Video Crawler", font=ctk.CTkFont(size=24, weight="bold"))
@@ -58,15 +41,18 @@ class VideoCrawlerApp(ctk.CTk):
         tab = self.tabview.tab("Task Setup")
         tab.grid_columnconfigure(1, weight=1)
 
-        self.source_label = ctk.CTkLabel(tab, text="Select Platform:")
-        self.source_label.grid(row=0, column=0, padx=20, pady=(30, 10), sticky="w")
+        ctk.CTkLabel(tab, text="Select Platform:").grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
         self.source_optionmenu = ctk.CTkOptionMenu(tab, values=["YouTube", "TikTok", "Instagram"])
-        self.source_optionmenu.grid(row=0, column=1, padx=20, pady=(30, 10), sticky="ew")
+        self.source_optionmenu.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
 
-        self.keyword_label = ctk.CTkLabel(tab, text="Target Objects/Actions:")
-        self.keyword_label.grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        ctk.CTkLabel(tab, text="Search Criteria:").grid(row=1, column=0, padx=20, pady=10, sticky="w")
         self.keyword_entry = ctk.CTkEntry(tab, placeholder_text="e.g., bench press, cutting onion")
-        self.keyword_entry.grid(row=2, column=1, padx=20, pady=10, sticky="ew")
+        self.keyword_entry.grid(row=1, column=1, padx=20, pady=10, sticky="ew")
+
+        ctk.CTkLabel(tab, text="Target Clip Count:").grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        self.count_entry = ctk.CTkEntry(tab, placeholder_text="How many videos do you want?")
+        self.count_entry.insert(0, "3")  # Default to 3
+        self.count_entry.grid(row=2, column=1, padx=20, pady=10, sticky="ew")
 
         self.start_button = ctk.CTkButton(tab, text="Start Crawling & Trimming", command=self.start_processing,
                                           height=40)
@@ -92,27 +78,15 @@ class VideoCrawlerApp(ctk.CTk):
         tab = self.tabview.tab("Settings")
         tab.grid_columnconfigure(1, weight=1)
 
-        self.api_label = ctk.CTkLabel(tab, text="Google Cloud JSON Path:")
-        self.api_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
-        self.api_entry = ctk.CTkEntry(tab, placeholder_text="Path to credentials.json")
-        self.api_entry.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
+        self.gemini_video_label = ctk.CTkLabel(tab, text="Gemini API Key for video:")
+        self.gemini_video_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        self.gemini_video_entry = ctk.CTkEntry(tab, placeholder_text="Paste your Gemini API key here", show="*")
+        self.gemini_video_entry.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
 
-        self.browse_api_btn = ctk.CTkButton(tab, text="Browse", width=80, command=self.browse_api_key)
-        self.browse_api_btn.grid(row=0, column=2, padx=(0, 20), pady=(20, 10))
-
-        self.gemini_label = ctk.CTkLabel(tab, text="Gemini API Key:")
-        self.gemini_label.grid(row=1, column=0, padx=20, pady=(10, 10), sticky="w")
-        self.gemini_entry = ctk.CTkEntry(tab, placeholder_text="Paste your free Gemini API key here")
-        self.gemini_entry.grid(row=1, column=1, columnspan=2, padx=20, pady=(10, 10), sticky="ew")
-
-    def browse_api_key(self):
-        file_path = ctk.filedialog.askopenfilename(
-            title="Select Google Cloud JSON Key",
-            filetypes=[("JSON Files", "*.json")]
-        )
-        if file_path:
-            self.api_entry.delete(0, "end")
-            self.api_entry.insert(0, file_path)
+        self.gemini_intent_label = ctk.CTkLabel(tab, text="Gemini API Key for intent translation:")
+        self.gemini_intent_label.grid(row=1, column=0, padx=20, pady=(10, 10), sticky="w")
+        self.gemini_intent_entry = ctk.CTkEntry(tab, placeholder_text="Paste your Gemini API key here", show="*")
+        self.gemini_intent_entry.grid(row=1, column=1, padx=20, pady=(10, 10), sticky="ew")
 
     def log_message(self, message):
         self.after(0, self._insert_log, message)
@@ -135,6 +109,12 @@ class VideoCrawlerApp(ctk.CTk):
         source = self.source_optionmenu.get()
         raw_input = self.keyword_entry.get()
 
+        try:
+            target_count = int(self.count_entry.get())
+        except ValueError:
+            self.log_message("[ERROR] Please enter a valid number for Target Count.")
+            return
+
         if not raw_input:
             self.tabview.set("Active Jobs & Logs")
             self.log_message("[ERROR] Please provide Search Criteria.")
@@ -147,42 +127,48 @@ class VideoCrawlerApp(ctk.CTk):
 
         self.start_button.configure(state="disabled")
 
-        agent_thread = threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source), daemon=True)
-        agent_thread.start()
+        threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source, target_count), daemon=True).start()
 
-    def run_agent_pipeline(self, raw_input, source):
+    def run_agent_pipeline(self, raw_input, source, target_count):
         try:
-            gemini_key = self.gemini_entry.get()
-            google_json = self.api_entry.get()
+            gemini_key_intent = self.gemini_intent_entry.get()
+            gemini_key_video = self.gemini_video_entry.get()
 
-            agent = LLMAgent(api_key=gemini_key, logger_callback=self.log_message)
+            agent = LLMAgent(api_key=gemini_key_intent, logger_callback=self.log_message)
             crawler = VideoDownloader(output_dir=self.output_dir, logger_callback=self.log_message)
-            vision_ai = VideoAnalyzer(json_key_path=google_json, logger_callback=self.log_message)
+            analyzer = VideoAnalyzer(api_key=gemini_key_video, logger_callback=self.log_message)
 
             optimized_data = agent.translate_intent(raw_input)
             if not optimized_data:
                 return
 
-            search_query = optimized_data["platform_search_query"]
-            vision_objects = optimized_data["vision_target_objects"]
+            self.log_message(f"[INFO] Hunting for {target_count} clips on {source}...")
+            url_pool = crawler.search_urls(optimized_data["platform_search_query"], source, limit=20)
+            successful_clips = 0
+            while successful_clips < target_count and url_pool:
+                current_url = url_pool.pop(0)  # Get the next URL in line
+                self.log_message(f"\n[PIPELINE] Processing next candidate ({successful_clips}/{target_count} done)")
 
-            self.log_message(f"[INFO] Searching for: '{vision_objects}'")
+                # Download
+                video_file = crawler.download_single(current_url)
+                if not video_file:
+                    continue  # Skip to next URL if download fails
 
-            downloaded_files = crawler.download(search_query, source)
-
-            for title, file_path in downloaded_files:
-                self.log_message(f"[INFO] Successfully Saved: {file_path}")
-
-                timestamps = vision_ai.analyze(file_path, optimized_data)
+                # Analyze
+                self.log_message(f"[PIPELINE] Analyzing {os.path.basename(video_file)}...")
+                timestamps = analyzer.analyze_with_gemini(video_file, raw_input)
 
                 if timestamps:
-                    self.log_message("-" * 40)
-                    self.log_message("[INFO] Ready for Step 4 (Trimming).")
-                    # TODO: Step 4 - Send timestamps to FFmpeg to cut the video
+                    # TODO: Step 4 - Trigger Trimming with FFmpeg
+                    self.log_message(f"[SUCCESS] Found {len(timestamps)} matches. Trimming now...")
+                    successful_clips += 1
                 else:
-                    self.log_message(f"[WARNING] No visual matches found, skipping trim for: {title}")
+                    self.log_message(f"[SKIP] No action matches found in this video.")
 
-                self.log_message("-" * 40)
+            if successful_clips < target_count:
+                self.log_message(f"[INFO] Finished. Found {successful_clips} clips (ran out of search results).")
+            else:
+                self.log_message(f"[FINISH] Successfully collected {target_count} clips!")
 
         except Exception as e:
             self.log_message(f"[PIPELINE ERROR] {str(e)}")
