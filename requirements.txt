@@ -4,3 +4,4 @@ static-ffmpeg
 duckduckgo-search
 protobuf
 customtkinter
+python-dotenv

@@ -16,7 +16,7 @@ class LLMAgent:
         try:
             prompt = f"""
             A user wants to find video clips of the following action/concept: "{raw_input}"
-            Create a highly optimized, broad search query for platforms like YouTube/TikTok to find this action.
+            Create a highly optimized, short search query for platforms like YouTube/TikTok to find this action.
 
             Return ONLY valid JSON:
             {{

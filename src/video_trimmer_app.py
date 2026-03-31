@@ -3,14 +3,18 @@ import sys
 import subprocess
 import threading
 import customtkinter as ctk
+from dotenv import load_dotenv
 
 from llm_agent import LLMAgent
 from crawler import VideoDownloader
 from video_analyzer import VideoAnalyzer
 from video_editor import VideoEditor
 
+load_dotenv()
+
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
+
 
 class VideoCrawlerApp(ctk.CTk):
     def __init__(self):
@@ -19,6 +23,8 @@ class VideoCrawlerApp(ctk.CTk):
         self.title("AI Video Crawler & Trimmer")
         self.geometry("700x650")
         self.resizable(False, False)
+
+        self.cancel_event = threading.Event()
 
         self.title_label = ctk.CTkLabel(self, text="Targeted Video Crawler", font=ctk.CTkFont(size=24, weight="bold"))
         self.title_label.pack(pady=(20, 10))
@@ -60,9 +66,16 @@ class VideoCrawlerApp(ctk.CTk):
         self.length_entry.insert(0, "15")
         self.length_entry.grid(row=3, column=1, padx=20, pady=10, sticky="ew")
 
-        self.start_button = ctk.CTkButton(tab, text="Start Crawling & Trimming", command=self.start_processing,
+        self.btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        self.btn_frame.grid(row=4, column=0, columnspan=2, pady=(30, 10))
+
+        self.start_button = ctk.CTkButton(self.btn_frame, text="Start Pipeline", command=self.start_processing,
                                           height=40)
-        self.start_button.grid(row=4, column=0, columnspan=2, padx=20, pady=(30, 10))
+        self.start_button.pack(side="left", padx=10)
+
+        self.cancel_button = ctk.CTkButton(self.btn_frame, text="Cancel Job", command=self.cancel_processing, height=40,
+                                           fg_color="#C62828", hover_color="#b71c1c", state="disabled")
+        self.cancel_button.pack(side="left", padx=10)
 
     def setup_logs_tab(self):
         tab = self.tabview.tab("Active Jobs & Logs")
@@ -79,15 +92,18 @@ class VideoCrawlerApp(ctk.CTk):
     def setup_settings_tab(self):
         tab = self.tabview.tab("Settings")
         tab.grid_columnconfigure(1, weight=1)
+        env_key = os.getenv("GEMINI_API_KEY", "")
 
         self.gemini_video_label = ctk.CTkLabel(tab, text="Gemini API Key for video:")
         self.gemini_video_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
         self.gemini_video_entry = ctk.CTkEntry(tab, placeholder_text="Paste your Gemini API key here", show="*")
+        self.gemini_video_entry.insert(0, env_key)
         self.gemini_video_entry.grid(row=0, column=1, padx=20, pady=(20, 10), sticky="ew")
 
         self.gemini_intent_label = ctk.CTkLabel(tab, text="Gemini API Key for intent translation:")
         self.gemini_intent_label.grid(row=1, column=0, padx=20, pady=(10, 10), sticky="w")
         self.gemini_intent_entry = ctk.CTkEntry(tab, placeholder_text="Paste your Gemini API key here", show="*")
+        self.gemini_intent_entry.insert(0, env_key)
         self.gemini_intent_entry.grid(row=1, column=1, padx=20, pady=(10, 10), sticky="ew")
 
     def log_message(self, message):
@@ -106,6 +122,12 @@ class VideoCrawlerApp(ctk.CTk):
             subprocess.call(["open", self.output_dir])
         else:
             subprocess.call(["xdg-open", self.output_dir])
+
+    def cancel_processing(self):
+        if not self.cancel_event.is_set():
+            self.log_message("\n[WARNING] Cancelling job... (Will stop after current task finishes)")
+            self.cancel_event.set()
+            self.cancel_button.configure(state="disabled")
 
     def start_processing(self):
         source = self.source_optionmenu.get()
@@ -129,8 +151,11 @@ class VideoCrawlerApp(ctk.CTk):
         self.log_message(f"STARTING NEW JOB: {raw_input} ({source})")
 
         self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.cancel_event.clear()
 
-        threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source, target_count, max_len), daemon=True).start()
+        threading.Thread(target=self.run_agent_pipeline, args=(raw_input, source, target_count, max_len),
+                         daemon=True).start()
 
     def run_agent_pipeline(self, raw_input, source, target_count, max_len):
         try:
@@ -150,6 +175,9 @@ class VideoCrawlerApp(ctk.CTk):
             url_pool = crawler.search_urls(optimized_data["platform_search_query"], source, limit=20)
             successful_clips = 0
             while successful_clips < target_count and url_pool:
+                if self.cancel_event.is_set():
+                    self.log_message("[CANCELLED] Pipeline stopped by user.")
+                    break
                 current_url = url_pool.pop(0)
                 self.log_message(f"\n[PIPELINE] Processing next candidate ({successful_clips}/{target_count} done)")
 
@@ -157,7 +185,16 @@ class VideoCrawlerApp(ctk.CTk):
                 if not video_file:
                     continue
 
+                if self.cancel_event.is_set():
+                    if os.path.exists(video_file): os.remove(video_file)
+                    self.log_message("[CANCELLED] Pipeline stopped by user.")
+                    break
+
                 timestamps = analyzer.analyze_with_gemini(video_file, raw_input)
+                if self.cancel_event.is_set():
+                    if os.path.exists(video_file): os.remove(video_file)
+                    self.log_message("[CANCELLED] Pipeline stopped by user.")
+                    break
 
                 if timestamps:
                     final_video = editor.trim_and_merge(video_file, timestamps, max_length=max_len)
@@ -169,15 +206,17 @@ class VideoCrawlerApp(ctk.CTk):
                 if os.path.exists(video_file):
                     os.remove(video_file)
 
-            if successful_clips < target_count:
-                self.log_message(f"[INFO] Finished. Found {successful_clips} clips (ran out of search results).")
-            else:
-                self.log_message(f"[FINISH] Successfully collected {target_count} clips!")
+            if not self.cancel_event.is_set():
+                if successful_clips < target_count:
+                    self.log_message(f"[INFO] Finished. Found {successful_clips} clips (ran out of search results).")
+                else:
+                    self.log_message(f"[FINISH] Successfully collected {target_count} clips!")
 
         except Exception as e:
             self.log_message(f"[PIPELINE ERROR] {str(e)}")
         finally:
             self.after(0, lambda: self.start_button.configure(state="normal"))
+            self.after(0, lambda: self.cancel_button.configure(state="disabled"))
 
         self.log_message("[INFO] End of the session.")
 
